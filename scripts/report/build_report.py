@@ -364,16 +364,55 @@ def table(df: pd.DataFrame, cols=None, rename=None, formatters=None,
                         formatters=formatters, na_rep="—")
 
 
-def fmt(x, dec=2) -> str:
-    if x is None or (isinstance(x, float) and (np.isnan(x) or np.isinf(x))):
-        return "—"
-    return f"{x:,.{dec}f}"
+def is_valid_number(value) -> bool:
+    """True solo para numeros finitos (acepta tipos Python y NumPy)."""
+    if value is None:
+        return False
+    try:
+        return bool(np.isfinite(float(value)))
+    except (TypeError, ValueError):
+        return False
 
 
-def pct(x, dec=1) -> str:
-    if x is None or (isinstance(x, float) and (np.isnan(x) or np.isinf(x))):
-        return "—"
-    return f"{x * 100:,.{dec}f}%"
+def fmt(value, dec=2, signed=False, fallback="—") -> str:
+    """Formatea un numero sin permitir NaN/Inf en la capa de presentacion."""
+    if not is_valid_number(value):
+        return fallback
+    sign = "+" if signed else ""
+    return f"{float(value):{sign},.{dec}f}"
+
+
+def pct(value, dec=1, signed=False, fallback="—") -> str:
+    """Formatea una proporcion como porcentaje sin permitir NaN/Inf."""
+    if not is_valid_number(value):
+        return fallback
+    sign = "+" if signed else ""
+    return f"{float(value) * 100:{sign},.{dec}f}%"
+
+
+def safe_mean(series: pd.Series, default=None):
+    """Media segura: una serie vacia o totalmente invalida no produce NaN visible."""
+    value = pd.to_numeric(series, errors="coerce").mean()
+    return float(value) if is_valid_number(value) else default
+
+
+def sanitize_for_json(value):
+    """Convierte NaN/Inf/NA a None para emitir JSON estandar (null)."""
+    if isinstance(value, dict):
+        return {str(k): sanitize_for_json(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [sanitize_for_json(v) for v in value]
+    if isinstance(value, np.ndarray):
+        return sanitize_for_json(value.tolist())
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (float, np.floating)):
+        return float(value) if np.isfinite(value) else None
+    if value is None or value is pd.NA:
+        return None
+    if isinstance(value, (pd.Timestamp, np.datetime64)):
+        return str(value)
+    return value
 
 
 BADGES = {
@@ -453,8 +492,10 @@ def market_state(row: pd.Series) -> tuple:
 
 
 def risk_level(atr_pct_series: pd.Series, current: float) -> tuple:
-    hist = atr_pct_series.tail(252)
-    pctile = float((hist <= current).mean())
+    hist = pd.to_numeric(atr_pct_series, errors="coerce").dropna().tail(252)
+    if not is_valid_number(current) or hist.empty:
+        return "NO DISPONIBLE", None, "tone-hold"
+    pctile = float((hist <= float(current)).mean())
     if pctile < 0.33:
         return "BAJO", pctile, "tone-buy"
     if pctile < 0.66:
@@ -474,7 +515,8 @@ def recommendation_factors(row: pd.Series, news: pd.DataFrame, last_dt) -> list:
     recent = news[news["published_utc"] <= last_dt]
     w24 = recent[recent["published_utc"] >= last_dt - pd.Timedelta(hours=24)]
     w7d = recent[recent["published_utc"] >= last_dt - pd.Timedelta(days=7)]
-    sent24 = w24["sentiment_score"].mean() if len(w24) else 0.0
+    sent24 = safe_mean(w24["sentiment_score"], default=0.0)
+    sent7d = safe_mean(w7d["sentiment_score"], default=0.0)
     vol_trend = "en aumento" if row["vol_zscore"] > 0.5 else (
         "en caida" if row["vol_zscore"] < -0.5 else "estable")
     return [
@@ -484,10 +526,10 @@ def recommendation_factors(row: pd.Series, news: pd.DataFrame, last_dt) -> list:
          "tone-buy" if row["macd_hist"] > 0 and row["rsi_14"] >= 50 else
          "tone-sell" if row["macd_hist"] < 0 and row["rsi_14"] < 50 else "tone-hold"),
         ("Sentimiento de noticias",
-         f"{sentiment_from_score(sent24)} (24h: {sent24:+.3f} · 7d: "
-         f"{(w7d['sentiment_score'].mean() if len(w7d) else 0):+.3f})",
+         f"{sentiment_from_score(sent24)} (24h: {fmt(sent24, 3, signed=True)} · 7d: "
+         f"{fmt(sent7d, 3, signed=True)})",
          "tone-buy" if sent24 > 0.15 else "tone-sell" if sent24 < -0.15 else "tone-hold"),
-        ("Volumen", f"{vol_trend} (z = {row['vol_zscore']:+.2f})",
+        ("Volumen", f"{vol_trend} (z = {fmt(row['vol_zscore'], 2, signed=True)})",
          "tone-buy" if row["vol_zscore"] > 0.5 else
          "tone-sell" if row["vol_zscore"] < -0.5 else "tone-hold"),
     ]
@@ -516,9 +558,13 @@ def render(data: dict, assets: dict) -> str:
     js = (Path(__file__).parent / "report.js").read_text(encoding="utf-8")
     body = (Path(__file__).parent / "report_body.html").read_text(encoding="utf-8")
     html_out = body.replace("/*__CSS__*/", css).replace("/*__JS__*/", js)
-    html_out = html_out.replace("__REPORT_DATA__", json.dumps(assets, ensure_ascii=False))
+    safe_assets = sanitize_for_json(assets)
+    html_out = html_out.replace(
+        "__REPORT_DATA__",
+        json.dumps(safe_assets, ensure_ascii=False, allow_nan=False),
+    )
     for key, value in data.items():
-        html_out = html_out.replace(f"__{key}__", value)
+        html_out = html_out.replace(f"__{key}__", str(value))
     return html_out
 
 
@@ -585,20 +631,30 @@ def main() -> int:
         bl = backtest_bars(bars_test, pos_long, cost)
         bs = backtest_bars(bars_test, pos_ls, cost)
         cost_sens_rows += (
-            f"<tr><td class='mono'>{cost * 100:.2f}%</td>"
-            f"<td class='mono'>{bl['sharpe']:.2f}</td><td class='mono'>{pct(bl['total_return'])}</td>"
+            f"<tr><td class='mono'>{pct(cost, 2)}</td>"
+            f"<td class='mono'>{fmt(bl['sharpe'], 2)}</td><td class='mono'>{pct(bl['total_return'])}</td>"
             f"<td class='mono'>{pct(bl['total_costs'])}</td>"
-            f"<td class='mono'>{bs['sharpe']:.2f}</td><td class='mono'>{pct(bs['total_return'])}</td>"
+            f"<td class='mono'>{fmt(bs['sharpe'], 2)}</td><td class='mono'>{pct(bs['total_return'])}</td>"
             f"<td class='mono'>{pct(bs['total_costs'])}</td></tr>")
 
     logger.info("Procesando noticias...")
     news = load_news()
     news_hist = news[news["published_utc"] <= last_dt]
     news_30d = news_hist[news_hist["published_utc"] >= last_dt - pd.Timedelta(days=30)]
-    sent_avg_24h = news_hist[news_hist["published_utc"] >= last_dt - pd.Timedelta(hours=24)][
-        "sentiment_score"].mean()
-    sent_avg_7d = news_hist[news_hist["published_utc"] >= last_dt - pd.Timedelta(days=7)][
-        "sentiment_score"].mean()
+    sent_avg_24h = safe_mean(
+        news_hist.loc[
+            news_hist["published_utc"] >= last_dt - pd.Timedelta(hours=24),
+            "sentiment_score",
+        ],
+        default=None,
+    )
+    sent_avg_7d = safe_mean(
+        news_hist.loc[
+            news_hist["published_utc"] >= last_dt - pd.Timedelta(days=7),
+            "sentiment_score",
+        ],
+        default=None,
+    )
 
     state, state_tone, state_score, state_reasons = market_state(last_row)
     risk, risk_pctile, risk_tone = risk_level(feats_df["atr_pct"], last_row["atr_pct"])
@@ -657,29 +713,29 @@ def main() -> int:
     ])
     ablation_rows = "".join(
         f"<tr><td>{esc(tag)}</td><td class='mono'>{m['n_features']}</td>"
-        f"<td class='mono'>{m['oof']['f1_macro']:.4f}</td>"
-        f"<td class='mono'>{m['oof'].get('roc_auc_ovr', float('nan')):.4f}</td>"
-        f"<td class='mono'>{m['holdout']['f1_macro']:.4f}</td>"
-        f"<td class='mono'>{m['holdout'].get('roc_auc_ovr', float('nan')):.4f}</td></tr>"
+        f"<td class='mono'>{fmt(m['oof'].get('f1_macro'), 4)}</td>"
+        f"<td class='mono'>{fmt(m['oof'].get('roc_auc_ovr'), 4)}</td>"
+        f"<td class='mono'>{fmt(m['holdout'].get('f1_macro'), 4)}</td>"
+        f"<td class='mono'>{fmt(m['holdout'].get('roc_auc_ovr'), 4)}</td></tr>"
         for tag, m in evals.items())
 
     key_ind = [
-        ("RSI (14)", f"{last_row['rsi_14']:.2f}"),
-        ("MACD", f"{last_row['macd']:+.3f}"),
-        ("MACD señal", f"{last_row['macd_signal']:+.3f}"),
-        ("MACD histograma", f"{last_row['macd_hist']:+.3f}"),
-        ("Bollinger %B", f"{last_row['bb_pctb']:.2f}"),
+        ("RSI (14)", fmt(last_row["rsi_14"], 2)),
+        ("MACD", fmt(last_row["macd"], 3, signed=True)),
+        ("MACD señal", fmt(last_row["macd_signal"], 3, signed=True)),
+        ("MACD histograma", fmt(last_row["macd_hist"], 3, signed=True)),
+        ("Bollinger %B", fmt(last_row["bb_pctb"], 2)),
         ("Bollinger ancho", pct(last_row["bb_width"])),
-        ("ATR (14)", f"{last_row['atr_14']:.2f}"),
+        ("ATR (14)", fmt(last_row["atr_14"], 2)),
         ("ATR %", pct(last_row["atr_pct"])),
-        ("Volumen z-score", f"{last_row['vol_zscore']:+.2f}"),
+        ("Volumen z-score", fmt(last_row["vol_zscore"], 2, signed=True)),
         ("VWAP distancia", pct(last_row["vwap_dist"])),
         ("Dist. ORB high", pct(last_row["dist_orb_high"])),
         ("Dist. ORB low", pct(last_row["dist_orb_low"])),
-        ("Beta 60b", f"{last_row['beta_60b']:.2f}"),
-        ("Correlación 60b", f"{last_row['corr_60b']:.2f}"),
+        ("Beta 60b", fmt(last_row["beta_60b"], 2)),
+        ("Correlación 60b", fmt(last_row["corr_60b"], 2)),
         ("Alpha 1 barra", pct(last_row["alpha_1b"])),
-        ("SMA 20 / 50", f"{last_row['sma_20']:.2f} / {last_row['sma_50']:.2f}"),
+        ("SMA 20 / 50", f"{fmt(last_row['sma_20'], 2)} / {fmt(last_row['sma_50'], 2)}"),
     ]
     key_ind_rows = "".join(
         f"<tr><td>{esc(k)}</td><td class='mono'>{v}</td></tr>" for k, v in key_ind)
@@ -901,13 +957,13 @@ def main() -> int:
         "HORIZON": str(DAYTRADE_HORIZON_BARS),
         "TAU_PCT": f"{DAYTRADE_TAU_PCT:g}",
         "BT7_TABLE": bt7_table,
-        "SOX_BETA": f"{last_row['beta_60b']:.2f}",
-        "SOX_CORR": f"{last_row['corr_60b']:.2f}",
-        "SOX_RATIO_Z": f"{last_row['sox_ratio_z']:+.2f}",
+        "SOX_BETA": fmt(last_row["beta_60b"], 2),
+        "SOX_CORR": fmt(last_row["corr_60b"], 2),
+        "SOX_RATIO_Z": fmt(last_row["sox_ratio_z"], 2, signed=True),
         "SOX_ALPHA": pct(last_row["alpha_1b"]),
         "SIGNAL_CLASS": sig_class,
         "SIGNAL_LABEL": live_signal,
-        "SIGNAL_PRICE": f"{last_row['Close']:.2f}",
+        "SIGNAL_PRICE": fmt(last_row["Close"], 2),
         "SIGNAL_DATETIME": pd.to_datetime(last_dt, utc=True).tz_convert(NY_TZ).strftime("%Y-%m-%d %H:%M ET"),
         "PROB_BUY": pct(p_live[0]), "PROB_HOLD": pct(p_live[1]), "PROB_SELL": pct(p_live[2]),
         "SUCCESS_PROB": pct(success_p), "SUCCESS_HIST": pct(success_hist),
@@ -916,19 +972,19 @@ def main() -> int:
         "STATE_REASONS": " · ".join(state_reasons),
         "NEWS_TOTAL": f"{len(news_hist):,}",
         "NEWS_30D": f"{len(news_30d):,}",
-        "SENT_24H": f"{sent_avg_24h:+.3f}", "SENT_7D": f"{sent_avg_7d:+.3f}",
-        "SENT_TONE": ("tone-buy" if sent_avg_24h > 0.15 else
-                      "tone-sell" if sent_avg_24h < -0.15 else "tone-hold"),
+        "SENT_24H": fmt(sent_avg_24h, 3, signed=True), "SENT_7D": fmt(sent_avg_7d, 3, signed=True),
+        "SENT_TONE": ("tone-buy" if is_valid_number(sent_avg_24h) and sent_avg_24h > 0.15 else
+                      "tone-sell" if is_valid_number(sent_avg_24h) and sent_avg_24h < -0.15 else "tone-hold"),
         "ATR_PCT": pct(last_row["atr_pct"]),
-        "RSI_VALUE": f"{last_row['rsi_14']:.1f}",
-        "CARD_OOF_F1": f"{set_d['oof']['f1_macro']:.3f}",
-        "CARD_OOF_AUC": f"{set_d['oof'].get('roc_auc_ovr', float('nan')):.3f}",
-        "CARD_HOLD_F1": f"{set_d['holdout']['f1_macro']:.3f}",
-        "CARD_HOLD_AUC": f"{set_d['holdout'].get('roc_auc_ovr', float('nan')):.3f}",
+        "RSI_VALUE": fmt(last_row["rsi_14"], 1),
+        "CARD_OOF_F1": fmt(set_d["oof"].get("f1_macro"), 3),
+        "CARD_OOF_AUC": fmt(set_d["oof"].get("roc_auc_ovr"), 3),
+        "CARD_HOLD_F1": fmt(set_d["holdout"].get("f1_macro"), 3),
+        "CARD_HOLD_AUC": fmt(set_d["holdout"].get("roc_auc_ovr"), 3),
         "CARD_BASELINE": "0.182",
-        "CARD_ACC": f"{set_d['holdout']['accuracy']:.3f}",
-        "CARD_BALACC": f"{set_d['holdout']['balanced_accuracy']:.3f}",
-        "CARD_AUC_STD": f"±{set_d['oof'].get('auc_folds_std', float('nan')):.3f}",
+        "CARD_ACC": fmt(set_d["holdout"].get("accuracy"), 3),
+        "CARD_BALACC": fmt(set_d["holdout"].get("balanced_accuracy"), 3),
+        "CARD_AUC_STD": ("±" + fmt(set_d["oof"].get("auc_folds_std"), 3) if is_valid_number(set_d["oof"].get("auc_folds_std")) else "—"),
         "CARD_NTEST": f"{set_d['n_test']:,}",
         "CARD_BARS": f"{len(bars_test):,}",
         "CARD_SESSIONS": f"{len(sessions):,}",
@@ -945,36 +1001,36 @@ def main() -> int:
         "RECENT_NEWS_TABLE": recent_news_table,
         "SOX_COEF_TABLE": sox_coef_table,
         "COST_SENS_ROWS": cost_sens_rows,
-        "FIN_LONG_SHARPE": f"{bt_long['sharpe']:.2f}",
-        "FIN_LONG_SORTINO": f"{bt_long['sortino']:.2f}",
+        "FIN_LONG_SHARPE": fmt(bt_long["sharpe"], 2),
+        "FIN_LONG_SORTINO": fmt(bt_long["sortino"], 2),
         "FIN_LONG_MDD": pct(bt_long["max_dd"]),
-        "FIN_LONG_CALMAR": f"{bt_long['calmar']:.2f}",
+        "FIN_LONG_CALMAR": fmt(bt_long["calmar"], 2),
         "FIN_LONG_WIN": pct(bt_long["win_rate"]),
-        "FIN_LONG_PF": f"{bt_long['profit_factor']:.2f}",
+        "FIN_LONG_PF": fmt(bt_long["profit_factor"], 2),
         "FIN_LONG_RET": pct(bt_long["total_return"]),
         "FIN_LONG_ANN": pct(bt_long["annual_return"]),
         "FIN_LONG_TRADES": f"{bt_long['n_trades']:,}",
         "FIN_LONG_COST": pct(bt_long["total_costs"], 2),
         "FIN_LONG_AVG": pct(bt_long["avg_trade"], 3),
-        "FIN_LS_SHARPE": f"{bt_ls['sharpe']:.2f}",
-        "FIN_LS_SORTINO": f"{bt_ls['sortino']:.2f}",
+        "FIN_LS_SHARPE": fmt(bt_ls["sharpe"], 2),
+        "FIN_LS_SORTINO": fmt(bt_ls["sortino"], 2),
         "FIN_LS_MDD": pct(bt_ls["max_dd"]),
-        "FIN_LS_CALMAR": f"{bt_ls['calmar']:.2f}",
+        "FIN_LS_CALMAR": fmt(bt_ls["calmar"], 2),
         "FIN_LS_WIN": pct(bt_ls["win_rate"]),
-        "FIN_LS_PF": f"{bt_ls['profit_factor']:.2f}",
+        "FIN_LS_PF": fmt(bt_ls["profit_factor"], 2),
         "FIN_LS_RET": pct(bt_ls["total_return"]),
         "FIN_LS_TRADES": f"{bt_ls['n_trades']:,}",
         "FIN_BH_RET": pct(bt_bh["total_return"]),
-        "FIN_BH_SHARPE": f"{bt_bh['sharpe']:.2f}",
+        "FIN_BH_SHARPE": fmt(bt_bh["sharpe"], 2),
         "FIN_BH_MDD": pct(bt_bh["max_dd"]),
-        "FIN_IC": f"{ic:.3f}",
-        "FIN_TSTAT": f"{bt_long['tstat']:.2f}",
+        "FIN_IC": fmt(ic, 3),
+        "FIN_TSTAT": fmt(bt_long["tstat"], 2),
         "FIN_ACTIVE_BARS": f"{bt_long['active_bars']:,}",
-        "BT_RAW_SHARPE": f"{bt_raw['sharpe']:.2f}",
+        "BT_RAW_SHARPE": fmt(bt_raw["sharpe"], 2),
         "BT_RAW_RET": pct(bt_raw["total_return"]),
         "COST_BPS": f"{COST_CONSERVATIVE * 100:.1f}",
         "COST_REALISTA": f"{COST_REALISTA * 100:.2f}",
-        "FIN_REAL_SHARPE": f"{bt_long_real['sharpe']:.2f}",
+        "FIN_REAL_SHARPE": fmt(bt_long_real["sharpe"], 2),
         "FIN_REAL_RET": pct(bt_long_real["total_return"]),
         "FIN_REAL_COST": pct(bt_long_real["total_costs"], 2),
         "TEST_PERIOD": (f"{pd.to_datetime(bars_test['Datetime'].iloc[0], utc=True).date()} → "
