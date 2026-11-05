@@ -34,6 +34,11 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Create required directories
+        run: |
+          mkdir -p data
+          mkdir -p core/output/features
+
       - name: Run pipeline
         env:
           DATA_SOURCE: db
