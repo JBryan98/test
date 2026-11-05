@@ -24,7 +24,7 @@ Uso:
     python scripts/report/build_report.py
 
 Salida:
-    web/REPORT_NVDA/nvda_report.html
+    web/REPORT_NVDA/index.html
     web/REPORT_NVDA/data/*.csv
 """
 import html as html_mod

@@ -35,7 +35,7 @@ data/*.xlsx
 run_nvda.log*
 
 # ── Informe web: solo lo publicable ──
-# nvda_report.html + assets/ (Plotly local) + data/*.csv (botones de
+# index.html + assets/ (Plotly local) + data/*.csv (botones de
 # descarga del informe) SI se suben porque son lo que se publica.
 # El .rar es una copia empaquetada redundante: no.
 web/REPORT_NVDA/REPORT_NVDA.rar

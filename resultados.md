@@ -139,7 +139,7 @@ SIGNAL_PROBA_THRESHOLD=0.40
 - [ ] Homogeneizar calidad del sentimiento (FinBERT sobre `title`+`summary`, GDELT o re-pull AV uniforme).
 - [x] Integrar los CSV nuevos en `core/feature_engineering.py` (CSV expandido + corte 2021-06-11).
 - [x] Reentrenar y guardar artefactos con la config elegida (modelo_nvda_logreg.pkl, metrics.json).
-- [x] Informe HTML de 8 pestañas generado (`web/REPORT_NVDA/nvda_report.html`).
+- [x] Informe HTML de 8 pestañas generado (`web/REPORT_NVDA/index.html`).
 - [x] Eliminar Docker/PostgreSQL del proyecto operativo (2026-09-20).
 
 ## 9. Nota de reproducibilidad
@@ -215,7 +215,7 @@ sentimiento ya calculado por AV. Feature set válido: `sent_*` + `sent_decay` + 
 ## 11. Informe HTML final (2026-09-20)
 
 Generador: `scripts/report/build_report.py` (+ `report.css`, `report.js`, `report_body.html`).
-Salida: `web/REPORT_NVDA/nvda_report.html` (~470 KB) y `web/REPORT_NVDA/data/*.csv`.
+Salida: `web/REPORT_NVDA/index.html` (~470 KB) y `web/REPORT_NVDA/data/*.csv`.
 
 | Pestaña | Contenido |
 |---|---|

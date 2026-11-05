@@ -65,5 +65,5 @@ KPIS.md                         # KPIs de clasificación y financieros
 - [x] Labels day trading (H=4, tau fijo 0.8%, HOLD 49%)
 - [x] Modelo LogReg con ablaciones NVDA/SOX/noticias; OOF AUC 0.600, HOLDOUT AUC 0.601
 - [x] Predictor con umbral + bot horario + webhook
-- [x] Informe HTML de 8 pestañas (`web/REPORT_NVDA/nvda_report.html`)
+- [x] Informe HTML de 8 pestañas (`web/REPORT_NVDA/index.html`)
 - [ ] Dashboard Power BI (fase futura, fuera de alcance por ahora)

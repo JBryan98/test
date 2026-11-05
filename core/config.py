@@ -67,7 +67,7 @@ NEWS_HISTORY_EXCEL = NEWS_HISTORY_DIR / "news_history_nvda.xlsx"
 
 WEB_DIR = BASE_DIR / "web" / "REPORT_NVDA"
 WEB_DIR.mkdir(parents=True, exist_ok=True)
-WEB_HTML_NAME = "nvda_report.html"
+WEB_HTML_NAME = "index.html"
 
 IBKR_HOST = os.environ.get("IBKR_HOST", "127.0.0.1")
 IBKR_RUNTIME = os.environ.get("IBKR_RUNTIME", "tws").lower()
